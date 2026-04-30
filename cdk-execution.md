@@ -1,8 +1,3 @@
----
-inclusion: fileMatch
-fileMatchPattern: "cdk*"
----
-
 # CDK 執行規則
 
 執行 CDK 相關指令（`cdk synth`、`cdk diff`、`cdk deploy`、`cdk_deploy_agent.py`）時，這些指令耗時較長，不需要等待結果。
