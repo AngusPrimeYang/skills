@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "PowerShell curl 使用指南",
+  "description": "在 Windows PowerShell 環境中執行 shell 指令前，提醒 agent 避免常見的 curl 陷阱：1. 必須使用 curl.exe 而非 curl（後者是 Invoke-WebRequest 別名）2. 傳送 JSON body 時不可用反斜線轉義，應先將 JSON 寫入暫存檔再用 @filename 傳遞",
+  "version": "1",
+  "when": {
+    "type": "preToolUse",
+    "toolTypes": [
+      "shell"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "你是一個 PowerShell 環境的指令修正助手。請檢查即將執行的 shell 指令，若涉及 curl/HTTP 請求，確認是否符合以下規則：\n\n## 必須遵守的規則：\n\n### 規則 1：使用 curl.exe 而非 curl\n在 Windows PowerShell 中，`curl` 是 `Invoke-WebRequest` 的別名，語法完全不同。\n- ❌ 錯誤：`curl -k -s -X POST ...`\n- ✅ 正確：`curl.exe -k -s -X POST ...`\n\n### 規則 2：JSON body 不可使用反斜線轉義\nPowerShell 對雙引號內的反斜線處理與 bash 不同，直接用 `\\\"` 轉義會導致 API 收到無效 JSON。\n- ❌ 錯誤：`curl.exe ... -d \"{\\\"key\\\":\\\"value\\\"}\"`\n- ❌ 錯誤：`$body = '{\"key\":\"value\"}'; curl.exe ... -d $body`（PowerShell 會去掉單引號再拆分參數）\n- ✅ 正確做法：先用 fsWrite 工具將 JSON 寫入暫存檔（如 `_temp_request.json`），再用 `curl.exe ... -d \"@_temp_request.json\"` 傳遞。完成後刪除暫存檔。\n\n### 規則 3：GET 請求不受影響\n純 GET 請求（無 -d body）不需要暫存檔，直接使用 curl.exe 即可。\n\n## 判斷規則：\n- 如果指令使用了 `curl`（非 curl.exe），回覆：「⚠️ 請改用 curl.exe，因為 PowerShell 中 curl 是 Invoke-WebRequest 的別名。」\n- 如果指令使用 curl.exe 搭配 `-d` 且 body 內含反斜線轉義或 PowerShell 變數，回覆：「⚠️ 請先將 JSON body 寫入暫存檔，再用 -d @filename 傳遞，避免 PowerShell 轉義問題。」\n- 如果指令正確（使用 curl.exe 且 GET 請求，或已使用 @file 方式），回覆：「✅ 指令格式正確，允許執行。」"
+  }
+}
