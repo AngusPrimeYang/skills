@@ -1,0 +1,80 @@
+﻿{
+    "locale":  "zh-TW",
+    "guideFileSuffix":  "呼叫指南.md",
+    "punct":  {
+                  "colon":  "：",
+                  "lp":  "（",
+                  "rp":  "）",
+                  "slash":  "／",
+                  "mark":  "◎",
+                  "period":  "。",
+                  "arrow":  "→"
+              },
+    "cover":  {
+                  "systemName":  "會議室預約系統",
+                  "systemSub":  "會議室管理",
+                  "apiDocTitle":  "API應用說明文件",
+                  "madeBy":  "謹製"
+              },
+    "revision":  {
+                     "copyrightHeading":  "版權聲明",
+                     "copyrightBody":  "本文件所載之各項內容皆屬 所有。皆受到中華民國著作權法的保護。未經同意不得以任何形式修改、複製及轉載。",
+                     "revisionHeading":  "改版歷程",
+                     "colVersion":  "版次",
+                     "colDate":  "發行日期",
+                     "colDesc":  "修訂說明",
+                     "colUnit":  "修訂單位",
+                     "colWho":  "修訂人員",
+                     "firstIssue":  "初版發行",
+                     "yearSuffix":  "年",
+                     "monthSuffix":  "月",
+                     "daySuffix":  "日"
+                 },
+    "guide":  {
+                  "callGuideWord":  "呼叫指南",
+                  "commonResponse":  "通用回應格式",
+                  "requiredParams":  "必要參數"
+              },
+    "chapters":  {
+                     "ch1Title":  "整合API說明",
+                     "ch1Intro":  "本文件匯整自 {guideWord}。業務結果多為 HTTP 200。請以 action_result 判斷。",
+                     "s11Title":  "技術支援",
+                     "colItem":  "項目",
+                     "colContent":  "內容",
+                     "auth":  "授權",
+                     "s12Title":  "API組成概念",
+                     "s13Title":  "基本參數說明",
+                     "colParamName":  "參數名",
+                     "colDesc":  "說明",
+                     "bookingUidDesc":  "取消用",
+                     "s14Title":  "特殊通用API參數說明",
+                     "whitelist":  "白名單",
+                     "s15Title":  "整合API說明",
+                     "s16Title":  "API回傳代碼(action_result)一覽表",
+                     "colCode":  "代碼",
+                     "colMeaning":  "意義",
+                     "bizOk":  "業務成功",
+                     "bizFail":  "業務失敗",
+                     "ipNotInWhitelist":  "IP 不在白名單",
+                     "ch2Title":  "整合介面開發注意事項",
+                     "appendixTitle":  "附錄 A",
+                     "sourceFiles":  "來源檔",
+                     "colSection":  "章節",
+                     "colFileName":  "檔名"
+                 },
+    "api":  {
+                "purpose":  "目的",
+                "description":  "說明",
+                "seeGuide":  "詳見對應",
+                "auth":  "授權",
+                "params":  "參數",
+                "responseJson":  "回傳JSON",
+                "responseFields":  "回傳欄位",
+                "authFail":  "授權失敗",
+                "details":  "詳細說明"
+            },
+    "defaults":  {
+                     "baseUrl":  "http://localhost:5000",
+                     "authPolicy":  "MeetingRoomApiPolicy"
+                 }
+}

@@ -1,0 +1,80 @@
+﻿{
+    "locale":  "en",
+    "guideFileSuffix":  "呼叫指南.md",
+    "punct":  {
+                  "colon":  ": ",
+                  "lp":  "(",
+                  "rp":  ")",
+                  "slash":  "/",
+                  "mark":  "◎",
+                  "period":  ".",
+                  "arrow":  "→"
+              },
+    "cover":  {
+                  "systemName":  "Meeting Room Reservation System",
+                  "systemSub":  "Meeting Room Management",
+                  "apiDocTitle":  "API Application Guide",
+                  "madeBy":  "Prepared by"
+              },
+    "revision":  {
+                     "copyrightHeading":  "Copyright",
+                     "copyrightBody":  "All contents of this document are proprietary. Protected under applicable copyright law. No modification, reproduction, or redistribution without permission.",
+                     "revisionHeading":  "Revision History",
+                     "colVersion":  "Version",
+                     "colDate":  "Release Date",
+                     "colDesc":  "Description",
+                     "colUnit":  "Unit",
+                     "colWho":  "Author",
+                     "firstIssue":  "Initial release",
+                     "yearSuffix":  "-",
+                     "monthSuffix":  "-",
+                     "daySuffix":  ""
+                 },
+    "guide":  {
+                  "callGuideWord":  "call guide",
+                  "commonResponse":  "通用回應格式",
+                  "requiredParams":  "必要參數"
+              },
+    "chapters":  {
+                     "ch1Title":  "Integration API Overview",
+                     "ch1Intro":  "This document aggregates {guideWord} files. Business results are typically HTTP 200. Use action_result to determine success.",
+                     "s11Title":  "Technical Support",
+                     "colItem":  "Item",
+                     "colContent":  "Content",
+                     "auth":  "Authorization",
+                     "s12Title":  "API Composition",
+                     "s13Title":  "Basic Parameters",
+                     "colParamName":  "Parameter",
+                     "colDesc":  "Description",
+                     "bookingUidDesc":  "For cancel",
+                     "s14Title":  "Common API Parameters",
+                     "whitelist":  "whitelist",
+                     "s15Title":  "Integration APIs",
+                     "s16Title":  "API Return Codes (action_result)",
+                     "colCode":  "Code",
+                     "colMeaning":  "Meaning",
+                     "bizOk":  "Business success",
+                     "bizFail":  "Business failure",
+                     "ipNotInWhitelist":  "IP not in whitelist",
+                     "ch2Title":  "Integration Development Notes",
+                     "appendixTitle":  "Appendix A",
+                     "sourceFiles":  "Source files",
+                     "colSection":  "Section",
+                     "colFileName":  "File name"
+                 },
+    "api":  {
+                "purpose":  "Purpose",
+                "description":  "Description",
+                "seeGuide":  "See corresponding ",
+                "auth":  "Authorization",
+                "params":  "Parameters",
+                "responseJson":  "Response JSON",
+                "responseFields":  "Response fields",
+                "authFail":  "Authorization failure",
+                "details":  "Details"
+            },
+    "defaults":  {
+                     "baseUrl":  "http://localhost:5000",
+                     "authPolicy":  "MeetingRoomApiPolicy"
+                 }
+}
