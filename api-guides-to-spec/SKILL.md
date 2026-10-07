@@ -5,7 +5,7 @@ description: >-
   （封面第一頁、改版歷程、章節分頁、◎ 區塊、實際 Word 表格、回傳JSON 樣本）。
   輸出 UTF-8 BOM .md 與 OOXML .docx（不用 Word COM）。
   何時使用：匯整呼叫指南、匯出 API 說明文件、guides to docx/md、
-  重新產生 MeetingRoom_API_Spec，或由多份呼叫指南產生正式 API 規格說明文件。
+  重新產生 API_Spec，或由多份呼叫指南產生正式 API 規格說明文件。
 ---
 
 # API 呼叫指南 → 正式 API 說明文件 (md + docx)
@@ -36,7 +36,7 @@ Windows PowerShell (`required_permissions: ["all"]`):
 powershell -NoProfile -ExecutionPolicy Bypass -File ".cursor/skills/api-guides-to-spec/scripts/Convert-GuidesToApiSpec.ps1" `
   -GuideDir "MCP" `
   -OutDir "MCP" `
-  -OutBaseName "MeetingRoom_API_Spec"
+  -OutBaseName "API_Spec"
 ```
 
 `-Locale`（預設 `zh-TW`）載入 `labels/labels.<Locale>.json`。新增語系：複製 `labels.zh-TW.json` 為 `labels.<id>.json` 並翻譯。亦可 `-LabelsPath` / `-SystemName` / `-SystemSub`。
@@ -45,15 +45,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".cursor/skills/api-guides-t
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ".cursor/skills/api-guides-to-spec/scripts/Convert-GuidesToApiSpec.ps1" `
-  -GuideDir "MCP" -OutDir "MCP" -OutBaseName "MeetingRoom_API_Spec_en" -Locale "en"
+  -GuideDir "MCP" -OutDir "MCP" -OutBaseName "API_Spec_en" -Locale "en"
 ```
 
 若 Spec.md 已存在、僅需 docx：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ".cursor/skills/api-guides-to-spec/scripts/Convert-SpecMdToDocx.ps1" `
-  -MdPath "MCP/MeetingRoom_API_Spec.md" `
-  -OutDocx "MCP/MeetingRoom_API_Spec.docx"
+  -MdPath "MCP/API_Spec.md" `
+  -OutDocx "MCP/API_Spec.docx"
 ```
 
 ## 進度
@@ -75,7 +75,7 @@ See [reference.md](reference.md)。
 
 | 檔案 | 說明 |
 |------|-------|
-| `MCP/MeetingRoom_API_Spec.md` | UTF-8 **with BOM**（中文內容） |
-| `MCP/MeetingRoom_API_Spec.docx` | OOXML |
+| `MCP/API_Spec.md` | UTF-8 **with BOM**（中文內容） |
+| `MCP/API_Spec.docx` | OOXML |
 
 公司 / logo / 修訂單位 / 修訂人員 預設 **留空**。
