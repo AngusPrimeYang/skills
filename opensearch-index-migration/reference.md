@@ -37,7 +37,20 @@
 | `WRITE_BLOCK_MAX_SECONDS` | `120` | Abort+unblock under lock (`0`=off) |
 | `FINAL_DELTA_SYNC` | `yes` | Sync reindex under write-block |
 | `MIGRATE_LARGE_REINDEX_SIZE` | `2500` | Auto bump scroll size on large |
-| `MIGRATE_LARGE_KEEP_RPS` | — | Keep throttled RPS on large |
+| `MIGRATE_RPS_LOAD_FRACTION` | `2/3` | Mid/large: RPS = full × fraction (CPU guard) |
+| `MIGRATE_RPS_ESTIMATE_FROM_STORE` | `yes` | Derive FULL from `pri.store / docs` |
+| `MIGRATE_RPS_REF_BYTES_PER_DOC` | `5700` | Calibration bytes/doc (~east_run) |
+| `MIGRATE_RPS_REF_FULL_DOCS_S` | `900` | Calibration unthrottled docs/s |
+| `MIGRATE_RPS_ESTIMATE_MIN` / `MAX` | `400` / `8000` | Clamp for estimated FULL |
+| `MIGRATE_RPS_FULL` | (unset) | Explicit FULL skips store estimate; else estimate → env RPS → `900` |
+| `MIGRATE_LARGE_KEEP_RPS` | — | Keep env RPS as-is (skip fraction) |
+| `MIGRATE_RPS_ADAPTIVE` | `yes` | wait-task: rethrottle via CPU EMA |
+| `MIGRATE_CPU_TARGET_LOW` / `HIGH` | `75` / `85` | EMA band for raise / cut |
+| `MIGRATE_CPU_PANIC` | `95` | Instant cut on now-CPU |
+| `MIGRATE_CPU_EMA_ALPHA` | `35` | EMA new-sample weight (%) |
+| `MIGRATE_CPU_EMA_WARMUP` | `2` | Samples before raise/cut |
+| `MIGRATE_RPS_ADAPTIVE_START` | (unset) | If set: wait-task start when RPS off; else store estimate × fraction (fallback 4000) |
+| `MIGRATE_RPS_MIN` / `MAX` | `500` / `8000` | Adaptive clamp |
 | `SKIP_ALIAS_VERIFY` | migrate: yes | Skip GET after cutover |
 | `QUIET` | migrate: yes | Less dump chatter |
 

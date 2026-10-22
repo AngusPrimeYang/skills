@@ -65,7 +65,7 @@ Step-by-step: `dump-source` → `create-dest` → `reindex-full` → `wait-task`
 |------|--------|
 | No doc backup by default | Resumable reindex + compare |
 | `slices` as query param only | Body `slices` may return HTTP 400 |
-| Watermark | Producer sortable field via `WATERMARK_FIELD` (example format `%Y/%m/%d %H:%M:%S`) |
+| Watermark | Producer sortable field via `WATERMARK_FIELD`; string format via `WATERMARK_DATE_FORMAT` (default `%Y/%m/%d %H:%M:%S`; ISO e.g. `%Y-%m-%dT%H:%M:%S`) |
 | Catchup goal | Time proximity (`DELTA_TARGET_SECONDS`, `created→0`), not absolute doc equality |
 | Cutover | `POST /_aliases` with `remove_index` + `add` (atomic) |
 | Snapshot | Pre-lock wait; under lock retry but **abort+unblock** if `WRITE_BLOCK_MAX_SECONDS` exceeded |
@@ -73,10 +73,12 @@ Step-by-step: `dump-source` → `create-dest` → `reindex-full` → `wait-task`
 
 ## Auto-tune (migrate)
 
-- **&lt;250k**: RPS off, slices off  
-- **&lt;500k**: RPS off, keep slices  
-- **≥500k**: RPS off; slices off if 1 primary shard; bump `REINDEX_SIZE` 1000→2500  
-- Keep env RPS: `MIGRATE_LARGE_KEEP_RPS=yes`
+- **&lt;250k**: RPS off, slices off (short burst OK)
+- **&lt;500k / ≥500k**: keep slices (large 1-shard → slices off); **throttle** to `MIGRATE_RPS_LOAD_FRACTION` × full (default **2/3**) instead of RPS=off — avoids CPU spikes seen on full-speed large reindex
+- **≥500k**: also bump `REINDEX_SIZE` 1000→2500 when still at 1000
+- Absolute env RPS: `MIGRATE_LARGE_KEEP_RPS=yes` (skips fraction)
+- Knobs: `MIGRATE_RPS_LOAD_FRACTION=2/3|1/2|off`; **FULL** from `pri.store/docs` by default (`MIGRATE_RPS_ESTIMATE_FROM_STORE=yes`), calibrated to ~900 docs/s @ ~5.7KB/doc — small-doc indexes get multi-k FULL; override with `MIGRATE_RPS_FULL=<n>`
+- **wait-task adaptive** (default on): `_rethrottle` using **EMA** of max-node CPU vs band `MIGRATE_CPU_TARGET_LOW`–`HIGH` (75–85); instantaneous `MIGRATE_CPU_PANIC` (95) hard-brakes. Start RPS from env, else store estimate × fraction, else `MIGRATE_RPS_ADAPTIVE_START`. Disable: `MIGRATE_RPS_ADAPTIVE=no`
 
 ## After each successful migrate
 

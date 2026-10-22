@@ -138,6 +138,9 @@ init_paths() {
   SOURCE_DUMP="${WORK_DIR}/${SOURCE_INDEX}.source.json"
   CREATE_BODY="${WORK_DIR}/${DEST_INDEX}.create.json"
   WATERMARK_FIELD="${WATERMARK_FIELD:-EventTimestamp}"
+  # date(1) format for watermark strings; must be parseable by the field's mapping format.
+  # Default matches Lambda_Timestamp / Timestamp style. ISO example: %Y-%m-%dT%H:%M:%S
+  WATERMARK_DATE_FORMAT="${WATERMARK_DATE_FORMAT:-%Y/%m/%d %H:%M:%S}"
   DELTA_MARGIN_MINUTES="${DELTA_MARGIN_MINUTES:-5}"
   # final-delta only: minutes before last delta start (keep small to minimize lock window)
   FINAL_DELTA_MARGIN_MINUTES="${FINAL_DELTA_MARGIN_MINUTES:-1}"
@@ -287,17 +290,17 @@ state_set() {
 }
 
 utc_now_watermark_format() {
-  # Watermark wall-clock string; default TIME_FORMAT=%Y/%m/%d %H:%M:%S (UTC)
-  date -u '+%Y/%m/%d %H:%M:%S'
+  # Watermark wall-clock string (UTC); format via WATERMARK_DATE_FORMAT
+  date -u "+${WATERMARK_DATE_FORMAT}"
 }
 
 utc_minus_minutes_watermark_format() {
   local minutes="$1"
-  if date -u -d "now - ${minutes} minutes" '+%Y/%m/%d %H:%M:%S' >/dev/null 2>&1; then
-    date -u -d "now - ${minutes} minutes" '+%Y/%m/%d %H:%M:%S'
+  if date -u -d "now - ${minutes} minutes" "+${WATERMARK_DATE_FORMAT}" >/dev/null 2>&1; then
+    date -u -d "now - ${minutes} minutes" "+${WATERMARK_DATE_FORMAT}"
   else
     # BSD/macOS
-    date -u -v-"${minutes}"M '+%Y/%m/%d %H:%M:%S'
+    date -u -v-"${minutes}"M "+${WATERMARK_DATE_FORMAT}"
   fi
 }
 
@@ -305,13 +308,13 @@ utc_minus_minutes_watermark_format() {
 utc_iso_minus_minutes_watermark_format() {
   local iso="$1"
   local minutes="$2"
-  if date -u -d "${iso} - ${minutes} minutes" '+%Y/%m/%d %H:%M:%S' >/dev/null 2>&1; then
-    date -u -d "${iso} - ${minutes} minutes" '+%Y/%m/%d %H:%M:%S'
+  if date -u -d "${iso} - ${minutes} minutes" "+${WATERMARK_DATE_FORMAT}" >/dev/null 2>&1; then
+    date -u -d "${iso} - ${minutes} minutes" "+${WATERMARK_DATE_FORMAT}"
   else
     # BSD/macOS: parse then subtract
     local epoch
     epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${iso}" '+%s')"
-    date -u -r "$((epoch - minutes * 60))" '+%Y/%m/%d %H:%M:%S'
+    date -u -r "$((epoch - minutes * 60))" "+${WATERMARK_DATE_FORMAT}"
   fi
 }
 
@@ -587,8 +590,8 @@ cmd_final_delta() {
       echo "final-delta: last delta started ${started_utc} → gte=${watermark} (margin=${FINAL_DELTA_MARGIN_MINUTES}m)"
     elif [[ -n "${started_wm}" ]]; then
       # Fallback: treat stored watermark string as "now" base via date -d if possible
-      if date -u -d "${started_wm} - ${FINAL_DELTA_MARGIN_MINUTES} minutes" '+%Y/%m/%d %H:%M:%S' >/dev/null 2>&1; then
-        watermark="$(date -u -d "${started_wm} - ${FINAL_DELTA_MARGIN_MINUTES} minutes" '+%Y/%m/%d %H:%M:%S')"
+      if date -u -d "${started_wm} - ${FINAL_DELTA_MARGIN_MINUTES} minutes" "+${WATERMARK_DATE_FORMAT}" >/dev/null 2>&1; then
+        watermark="$(date -u -d "${started_wm} - ${FINAL_DELTA_MARGIN_MINUTES} minutes" "+${WATERMARK_DATE_FORMAT}")"
       else
         watermark="${started_wm}"
       fi
@@ -639,6 +642,111 @@ cmd_delta_estimate() {
   echo "estimated_docs=${count} (next reindex-delta lower bound=${watermark})"
 }
 
+# Max data-node OS CPU percent (empty on failure).
+cluster_max_cpu_percent() {
+  local out
+  out="$(os_request GET "/_nodes/stats/os?filter_path=nodes.*.os.cpu.percent" 2>/dev/null | jq -r '[.nodes[].os.cpu.percent] | max' 2>/dev/null || true)"
+  if [[ "${out}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    # floor to int for bash compare
+    printf '%s' "${out%%.*}"
+  fi
+}
+
+# POST _reindex/<task>/_rethrottle?requests_per_second=N  (-1 = off)
+reindex_rethrottle() {
+  local task="$1" rps="$2" enc
+  enc="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "${task}")"
+  os_request POST "/_reindex/${enc}/_rethrottle?requests_per_second=${rps}" >/dev/null
+}
+
+# CPU-band adaptive throttle during wait-task (default on).
+# Decide on EMA of max-node CPU (smooths reindex throttle sawtooth); instantaneous
+# CPU only for panic hard-brake. Target band: MIGRATE_CPU_TARGET_LOW..HIGH (75..85).
+# Requires numeric starting RPS (not off); if off, uses MIGRATE_RPS_ADAPTIVE_START.
+wait_task_maybe_adapt_rps() {
+  local task="$1"
+  local now cpu ema new_rps reason alpha warm
+  [[ "${MIGRATE_RPS_ADAPTIVE:-yes}" == "yes" ]] || return 0
+  [[ -n "${_adapt_rps:-}" ]] || return 0
+  now="$(date +%s)"
+  if [[ -z "${_adapt_last_ts:-}" ]]; then
+    _adapt_last_ts=0
+  fi
+  if (( now - _adapt_last_ts < ${_adapt_interval:-25} )); then
+    return 0
+  fi
+  _adapt_last_ts="${now}"
+  cpu="$(cluster_max_cpu_percent)"
+  if [[ -z "${cpu}" ]]; then
+    return 0
+  fi
+
+  alpha="${_adapt_ema_alpha:-35}"
+  if [[ -z "${_adapt_cpu_ema:-}" ]]; then
+    _adapt_cpu_ema="${cpu}"
+  else
+    # ema = (α*now + (100-α)*ema) / 100
+    _adapt_cpu_ema=$(( (cpu * alpha + _adapt_cpu_ema * (100 - alpha)) / 100 ))
+  fi
+  ema="${_adapt_cpu_ema}"
+  _adapt_samples=$((${_adapt_samples:-0} + 1))
+  warm="${_adapt_ema_warmup:-2}"
+
+  state_set "adapt_cpu" "${cpu}"
+  state_set "adapt_cpu_ema" "${ema}"
+  state_set "adapt_rps" "${_adapt_rps}"
+
+  # Warm up EMA before raise/cut (still allow panic).
+  if (( _adapt_samples <= warm )); then
+    if (( cpu >= ${_adapt_cpu_panic:-95} )); then
+      echo "  ... adaptive: warmup sample ${_adapt_samples}/${warm} but panic CPU=${cpu}% (ema=${ema})"
+    else
+      echo "  ... adaptive: warmup ${_adapt_samples}/${warm} CPU=${cpu}% ema=${ema}% RPS=${_adapt_rps}"
+      return 0
+    fi
+  fi
+
+  new_rps="${_adapt_rps}"
+  reason=""
+  local dir=0 # -1 cut, +1 raise
+  # Hard brake on extreme instantaneous spike (ignore EMA).
+  if (( cpu >= ${_adapt_cpu_panic:-95} )); then
+    new_rps=$((_adapt_rps * ${_adapt_panic_factor:-80} / 100))
+    reason="panic now=${cpu}% ema=${ema}%"
+    dir=-1
+  elif (( ema > ${_adapt_cpu_hi:-85} )); then
+    new_rps=$((_adapt_rps * ${_adapt_down_factor:-88} / 100))
+    reason="ema=${ema}% > ${_adapt_cpu_hi} (now=${cpu}%)"
+    dir=-1
+  elif (( ema < ${_adapt_cpu_lo:-75} )); then
+    new_rps=$((_adapt_rps * ${_adapt_up_factor:-112} / 100))
+    reason="ema=${ema}% < ${_adapt_cpu_lo} (now=${cpu}%)"
+    dir=1
+  else
+    echo "  ... adaptive: ema=${ema}% in band [${_adapt_cpu_lo}-${_adapt_cpu_hi}] (now=${cpu}%) keep RPS=${_adapt_rps}"
+    return 0
+  fi
+
+  if (( new_rps < _adapt_rps_min )); then new_rps="${_adapt_rps_min}"; fi
+  if (( new_rps > _adapt_rps_max )); then new_rps="${_adapt_rps_max}"; fi
+  # ensure at least ±50 step when factors round to same int
+  if (( new_rps == _adapt_rps )); then
+    new_rps=$((_adapt_rps + dir * 50))
+    if (( new_rps < _adapt_rps_min )); then new_rps="${_adapt_rps_min}"; fi
+    if (( new_rps > _adapt_rps_max )); then new_rps="${_adapt_rps_max}"; fi
+  fi
+  if (( new_rps == _adapt_rps )); then
+    return 0
+  fi
+  echo "  ... adaptive: ${reason} → RPS ${_adapt_rps} → ${new_rps}"
+  if reindex_rethrottle "${task}" "${new_rps}"; then
+    _adapt_rps="${new_rps}"
+    state_set "adapt_rps" "${_adapt_rps}"
+  else
+    echo "  WARN: rethrottle to ${new_rps} failed (keeping ${_adapt_rps})" >&2
+  fi
+}
+
 cmd_wait_task() {
   local task="${1:-$(state_get last_task)}"
   if [[ -z "${task}" ]]; then
@@ -647,6 +755,69 @@ cmd_wait_task() {
   fi
   echo "==> Waiting for task ${task}"
   local zero_streak=0 last_logged_created=-1 last_total_hint=0 poll=0
+
+  # CPU adaptive rethrottle via EMA (keeps load nearer 75–85%; fixed RPS alone cannot).
+  _adapt_interval="${MIGRATE_RPS_ADAPTIVE_INTERVAL_SECONDS:-25}"
+  _adapt_cpu_lo="${MIGRATE_CPU_TARGET_LOW:-75}"
+  _adapt_cpu_hi="${MIGRATE_CPU_TARGET_HIGH:-85}"
+  _adapt_cpu_panic="${MIGRATE_CPU_PANIC:-95}"
+  _adapt_ema_alpha="${MIGRATE_CPU_EMA_ALPHA:-35}"
+  _adapt_ema_warmup="${MIGRATE_CPU_EMA_WARMUP:-2}"
+  _adapt_up_factor="${MIGRATE_RPS_UP_FACTOR:-112}"
+  _adapt_down_factor="${MIGRATE_RPS_DOWN_FACTOR:-88}"
+  _adapt_panic_factor="${MIGRATE_RPS_PANIC_FACTOR:-80}"
+  _adapt_rps_min="${MIGRATE_RPS_MIN:-500}"
+  _adapt_rps_max="${MIGRATE_RPS_MAX:-8000}"
+  _adapt_rps=""
+  _adapt_last_ts=0
+  _adapt_cpu_ema=""
+  _adapt_samples=0
+  if [[ "${MIGRATE_RPS_ADAPTIVE:-yes}" == "yes" ]]; then
+    if [[ -n "${REQUESTS_PER_SECOND:-}" && "${REQUESTS_PER_SECOND}" =~ ^[1-9][0-9]*$ ]]; then
+      _adapt_rps="${REQUESTS_PER_SECOND}"
+    elif [[ -n "${MIGRATE_RPS_ADAPTIVE_START:-}" && "${MIGRATE_RPS_ADAPTIVE_START}" =~ ^[1-9][0-9]*$ ]]; then
+      _adapt_rps="${MIGRATE_RPS_ADAPTIVE_START}"
+      echo "adaptive: REQUESTS_PER_SECOND was off/empty → start RPS=${_adapt_rps} (MIGRATE_RPS_ADAPTIVE_START)"
+    else
+      # Prefer store-size estimate of start = FULL × fraction (same as migrate auto-tune)
+      local _est_full="" _est_start=""
+      if [[ "${MIGRATE_RPS_ESTIMATE_FROM_STORE:-yes}" == "yes" && -n "${SOURCE_INDEX:-}" ]]; then
+        if _est_full="$(estimate_rps_full_from_store "${SOURCE_INDEX}")"; then
+          _est_start="$(
+            FULL="${_est_full}" FRAC="${MIGRATE_RPS_LOAD_FRACTION:-2/3}" python3 - <<'PY'
+import os
+full = float(os.environ["FULL"])
+f = os.environ["FRAC"].strip()
+if "/" in f:
+    a, b = f.split("/", 1)
+    r = full * float(a) / float(b)
+elif f.endswith("%"):
+    r = full * float(f[:-1]) / 100.0
+else:
+    r = full * float(f)
+print(max(1, int(r)))
+PY
+          )"
+        fi
+      fi
+      _adapt_rps="${_est_start:-4000}"
+      if [[ -n "${_est_start}" ]]; then
+        echo "adaptive: REQUESTS_PER_SECOND was off/empty → start RPS=${_adapt_rps} (store estimate full=${_est_full} × fraction)"
+      else
+        echo "adaptive: REQUESTS_PER_SECOND was off/empty → start RPS=${_adapt_rps} (fallback default)"
+      fi
+    fi
+    if (( _adapt_rps < _adapt_rps_min )); then _adapt_rps="${_adapt_rps_min}"; fi
+    if (( _adapt_rps > _adapt_rps_max )); then _adapt_rps="${_adapt_rps_max}"; fi
+    echo "adaptive: on (CPU EMA band ${_adapt_cpu_lo}-${_adapt_cpu_hi}%, panic≥${_adapt_cpu_panic}%, α=${_adapt_ema_alpha}/100, warmup=${_adapt_ema_warmup}, interval=${_adapt_interval}s, RPS start=${_adapt_rps} min=${_adapt_rps_min} max=${_adapt_rps_max})"
+    reindex_rethrottle "${task}" "${_adapt_rps}" || echo "WARN: initial rethrottle to ${_adapt_rps} failed" >&2
+    state_set "adapt_rps" "${_adapt_rps}"
+    # force first adapt check after one interval from now
+    _adapt_last_ts="$(date +%s)"
+  else
+    echo "adaptive: off (MIGRATE_RPS_ADAPTIVE=${MIGRATE_RPS_ADAPTIVE:-})"
+  fi
+
   while true; do
     local resp completed total_hint created_hint sleep_s
     resp="$(os_request GET "/_tasks/${task}?wait_for_completion=false")"
@@ -752,6 +923,9 @@ cmd_wait_task() {
         last_logged_created="${created_hint}"
       fi
     fi
+
+    wait_task_maybe_adapt_rps "${task}"
+
     sleep "${sleep_s}"
   done
 }
@@ -1103,12 +1277,133 @@ cmd_fast_switch() {
 
 # Soft-tune during migrate (disable with MIGRATE_AUTO_TUNE=no).
 # Tiers (docs):
-#   small  < SMALL (250k): RPS off + slices off
-#   mid    < MID   (500k): RPS off, keep slices (multi-shard parallel)
-#   large  >= MID:         RPS off (avoid docs/RPS floor); slices off if 1 primary shard
-#                          set MIGRATE_LARGE_KEEP_RPS=yes to keep env REQUESTS_PER_SECOND
+#   small  < SMALL (250k): RPS off + slices off (short burst OK)
+#   mid    < MID   (500k): keep slices; apply MIGRATE_RPS_LOAD_FRACTION throttle
+#   large  >= MID:         same fraction throttle; slices off if 1 primary shard
+#                          MIGRATE_LARGE_KEEP_RPS=yes → keep env REQUESTS_PER_SECOND as-is
+#
+# Load fraction + dynamic FULL (pri.store/docs ≈ bytes/doc; calibrated on this domain):
+#   east_run ~5.7KB/doc → ~900 docs/s; ejd_mc_chg ~0.7KB/doc → ~7000 docs/s
+#   MIGRATE_RPS_LOAD_FRACTION=2/3   default (also: 1/2, 0.75, 75%, off|1 = full speed)
+#   MIGRATE_RPS_FULL=<n>           explicit 100% baseline (skips store estimate)
+#   MIGRATE_RPS_ESTIMATE_FROM_STORE=yes  default: derive FULL from store/docs
+
+# Estimate unthrottled docs/s from primary store size / doc count.
+# Prints integer FULL on stdout; logs details on stderr. Returns non-zero on failure.
+estimate_rps_full_from_store() {
+  local idx="${1:-${SOURCE_INDEX}}"
+  local stats docs store_b
+  stats="$(os_request GET "/${idx}/_stats?filter_path=indices.*.primaries.docs.count,indices.*.primaries.store.size_in_bytes" 2>/dev/null)" || return 1
+  docs="$(echo "${stats}" | jq -r '[.indices[].primaries.docs.count] | add // 0')"
+  store_b="$(echo "${stats}" | jq -r '[.indices[].primaries.store.size_in_bytes] | add // 0')"
+  if [[ -z "${docs}" || "${docs}" == "0" || -z "${store_b}" || "${store_b}" == "0" ]]; then
+    echo "auto-tune: store estimate skipped (docs=${docs:-?} store_b=${store_b:-?})" >&2
+    return 1
+  fi
+  REF_BPD="${MIGRATE_RPS_REF_BYTES_PER_DOC:-5700}" \
+  REF_FULL="${MIGRATE_RPS_REF_FULL_DOCS_S:-900}" \
+  DOCS="${docs}" STORE_B="${store_b}" \
+  EST_MIN="${MIGRATE_RPS_ESTIMATE_MIN:-400}" \
+  EST_MAX="${MIGRATE_RPS_ESTIMATE_MAX:-8000}" \
+  python3 - <<'PY'
+import os, sys
+docs = int(os.environ["DOCS"])
+store_b = int(os.environ["STORE_B"])
+ref_bpd = float(os.environ["REF_BPD"])
+ref_full = float(os.environ["REF_FULL"])
+est_min = int(os.environ["EST_MIN"])
+est_max = int(os.environ["EST_MAX"])
+bpd = store_b / docs
+# Same cluster IO budget ≈ ref_full * ref_bpd bytes/s
+byte_rate = ref_full * ref_bpd
+full = int(byte_rate / max(bpd, 1.0))
+full = max(est_min, min(est_max, full))
+print(
+    f"auto-tune: store estimate bpd={bpd:.0f}B "
+    f"(pri.store={store_b} docs={docs}) "
+    f"ref={ref_full:.0f}docs/s@{ref_bpd:.0f}B → FULL≈{full} "
+    f"(clamp {est_min}-{est_max})",
+    file=sys.stderr,
+)
+print(full)
+PY
+}
+
+# Compute REQUESTS_PER_SECOND = floor(full × fraction), min 1.
+# Args: $1 = captured env RPS before rewrite (may be empty; used only if no estimate / no MIGRATE_RPS_FULL)
+apply_migrate_rps_load() {
+  local env_full="${1:-}"
+  local frac="${MIGRATE_RPS_LOAD_FRACTION:-2/3}"
+  local full="${MIGRATE_RPS_FULL:-}"
+  local prev="${REQUESTS_PER_SECOND:-}"
+  local target estimated=""
+
+  case "${frac}" in
+    off|OFF|1|1.0|1/1)
+      echo "auto-tune: MIGRATE_RPS_LOAD_FRACTION=${frac} → REQUESTS_PER_SECOND=off (full speed)"
+      REQUESTS_PER_SECOND=off
+      return 0
+      ;;
+  esac
+
+  if [[ -z "${full}" ]]; then
+    if [[ "${MIGRATE_RPS_ESTIMATE_FROM_STORE:-yes}" == "yes" ]]; then
+      if estimated="$(estimate_rps_full_from_store "${SOURCE_INDEX}")"; then
+        full="${estimated}"
+        state_set "migrate_rps_full_estimated" "${full}"
+      fi
+    fi
+  fi
+  if [[ -z "${full}" ]]; then
+    if [[ -n "${env_full}" && "${env_full}" =~ ^[1-9][0-9]*$ ]]; then
+      full="${env_full}"
+      echo "auto-tune: FULL from env REQUESTS_PER_SECOND=${full}"
+    else
+      full="${MIGRATE_RPS_FULL_DEFAULT:-900}"
+      echo "auto-tune: FULL fallback default=${full}"
+    fi
+  else
+    if [[ -n "${MIGRATE_RPS_FULL:-}" ]]; then
+      echo "auto-tune: FULL from MIGRATE_RPS_FULL=${full}"
+    fi
+  fi
+  if [[ ! "${full}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MIGRATE_RPS_FULL/baseline must be a positive integer (got: ${full})" >&2
+    return 1
+  fi
+  state_set "migrate_rps_full" "${full}"
+
+  target="$(
+    FULL="${full}" FRAC="${frac}" python3 - <<'PY'
+import os, sys
+full = float(os.environ["FULL"])
+f = os.environ["FRAC"].strip()
+try:
+    if "/" in f:
+        a, b = f.split("/", 1)
+        r = full * float(a) / float(b)
+    elif f.endswith("%"):
+        r = full * float(f[:-1]) / 100.0
+    else:
+        r = full * float(f)
+except Exception as e:
+    print(f"bad MIGRATE_RPS_LOAD_FRACTION={f!r}: {e}", file=sys.stderr)
+    sys.exit(2)
+print(max(1, int(r)))
+PY
+  )" || return 1
+
+  echo "auto-tune: REQUESTS_PER_SECOND ${prev:-} → ${target} (full=${full} × fraction=${frac})"
+  REQUESTS_PER_SECOND="${target}"
+  # Align adaptive start with estimated start when not explicitly set
+  if [[ -z "${MIGRATE_RPS_ADAPTIVE_START:-}" ]]; then
+    MIGRATE_RPS_ADAPTIVE_START="${target}"
+    export MIGRATE_RPS_ADAPTIVE_START
+  fi
+}
+
 migrate_auto_tune() {
-  local docs shards
+  local docs shards env_rps_full=""
   local small="${MIGRATE_AUTO_TUNE_SMALL_DOCS:-${MIGRATE_AUTO_TUNE_MAX_DOCS:-250000}}"
   local mid="${MIGRATE_AUTO_TUNE_MID_DOCS:-500000}"
   if [[ "${MIGRATE_AUTO_TUNE:-yes}" != "yes" ]]; then
@@ -1124,18 +1419,19 @@ migrate_auto_tune() {
   state_set "migrate_source_docs" "${docs}"
   state_set "migrate_source_shards" "${shards}"
 
-  # Drop throttle floor unless large + KEEP_RPS (protect busy prod clusters)
+  # Capture env RPS before rewrite (used as fraction baseline)
+  if [[ -n "${REQUESTS_PER_SECOND:-}" && "${REQUESTS_PER_SECOND}" =~ ^[1-9][0-9]*$ ]]; then
+    env_rps_full="${REQUESTS_PER_SECOND}"
+  fi
+
+  # Absolute override: keep env throttle as-is (no fraction)
   if [[ "${docs}" -ge "${mid}" && "${MIGRATE_LARGE_KEEP_RPS:-}" == "yes" ]]; then
     echo "auto-tune: large + MIGRATE_LARGE_KEEP_RPS=yes — keep REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND:-} REINDEX_SLICES=${REINDEX_SLICES}"
     state_set "migrate_auto_tune" "large_keep_rps"
     state_set "migrate_rps" "${REQUESTS_PER_SECOND:-}"
     state_set "migrate_slices" "${REINDEX_SLICES}"
+    state_set "migrate_rps_fraction" "keep"
     return 0
-  fi
-
-  if [[ -n "${REQUESTS_PER_SECOND:-}" && "${REQUESTS_PER_SECOND}" != "0" && "${REQUESTS_PER_SECOND}" != "off" ]]; then
-    echo "auto-tune: REQUESTS_PER_SECOND ${REQUESTS_PER_SECOND} → off"
-    REQUESTS_PER_SECOND=off
   fi
 
   if [[ "${docs}" -ge "${mid}" ]]; then
@@ -1150,12 +1446,19 @@ migrate_auto_tune() {
       echo "auto-tune: REINDEX_SIZE 1000 → ${big_size} (large index)"
       REINDEX_SIZE="${big_size}"
     fi
-    echo "auto-tune: large index — RPS=off REINDEX_SLICES=${REINDEX_SLICES} REINDEX_SIZE=${REINDEX_SIZE}"
+    apply_migrate_rps_load "${env_rps_full}" || return 1
+    echo "auto-tune: large index — RPS=${REQUESTS_PER_SECOND} REINDEX_SLICES=${REINDEX_SLICES} REINDEX_SIZE=${REINDEX_SIZE}"
     state_set "migrate_auto_tune" "large"
   elif [[ "${docs}" -ge "${small}" ]]; then
-    echo "auto-tune: mid index — RPS=off keep REINDEX_SLICES=${REINDEX_SLICES}"
+    apply_migrate_rps_load "${env_rps_full}" || return 1
+    echo "auto-tune: mid index — RPS=${REQUESTS_PER_SECOND} keep REINDEX_SLICES=${REINDEX_SLICES}"
     state_set "migrate_auto_tune" "mid"
   else
+    # Small: short full-speed burst; slices off for clearer progress
+    if [[ -n "${REQUESTS_PER_SECOND:-}" && "${REQUESTS_PER_SECOND}" != "0" && "${REQUESTS_PER_SECOND}" != "off" ]]; then
+      echo "auto-tune: REQUESTS_PER_SECOND ${REQUESTS_PER_SECOND} → off (small index)"
+      REQUESTS_PER_SECOND=off
+    fi
     if [[ "${REINDEX_SLICES}" == "auto" ]]; then
       echo "auto-tune: REINDEX_SLICES auto → off (small index)"
       REINDEX_SLICES=off
@@ -1164,6 +1467,7 @@ migrate_auto_tune() {
   fi
   state_set "migrate_rps" "${REQUESTS_PER_SECOND:-}"
   state_set "migrate_slices" "${REINDEX_SLICES}"
+  state_set "migrate_rps_fraction" "${MIGRATE_RPS_LOAD_FRACTION:-2/3}"
 }
 
 # One-shot: dump → create → full → wait → catchup → fast-switch (same process after load).
@@ -1243,7 +1547,8 @@ Commands:
                   (CONFIRM=yes). Use after catchup for second-level cutover.
   migrate         One-shot: inspect→dump→create→full→wait→catchup→fast-switch
                   (CONFIRM=yes). No local backup.
-  wait-task [id]  Poll _tasks until completed; records last_took_ms / created
+  wait-task [id]  Poll _tasks until completed; optional CPU-band RPS adapt;
+                  records last_took_ms / created
   block-write     index.blocks.write=true on source
   unblock-write   index.blocks.write=false on source
   compare         Print source vs dest _count
@@ -1262,9 +1567,25 @@ Optional overrides (CLI exports beat migration.env):
   REINDEX_SLICES=off                    clearer progress vs slices=auto
   MIGRATE_AUTO_TUNE=no                  disable migrate auto RPS/slices tuning
   MIGRATE_AUTO_TUNE_SMALL_DOCS=250000   docs < this → RPS off + slices off
-  MIGRATE_AUTO_TUNE_MID_DOCS=500000     docs < this → RPS off, keep slices
+  MIGRATE_AUTO_TUNE_MID_DOCS=500000     docs < this → fraction throttle + slices
   MIGRATE_AUTO_TUNE_MAX_DOCS=250000     alias for SMALL_DOCS (compat)
-  MIGRATE_LARGE_KEEP_RPS=yes            large: keep env REQUESTS_PER_SECOND (throttle)
+  MIGRATE_RPS_LOAD_FRACTION=2/3         mid/large: RPS = full × fraction (default 2/3)
+  MIGRATE_RPS_FULL=900                  optional explicit FULL (skips store estimate)
+  MIGRATE_RPS_ESTIMATE_FROM_STORE=yes   derive FULL from pri.store/docs (default)
+  MIGRATE_RPS_REF_BYTES_PER_DOC=5700    calibration: ~east_run bytes/doc
+  MIGRATE_RPS_REF_FULL_DOCS_S=900       calibration: ~east_run unthrottled docs/s
+  MIGRATE_RPS_ESTIMATE_MIN=400 MAX=8000 clamp for estimated FULL
+  MIGRATE_LARGE_KEEP_RPS=yes            large: keep env REQUESTS_PER_SECOND (no fraction)
+  MIGRATE_RPS_ADAPTIVE=yes              wait-task: rethrottle using CPU EMA band
+  MIGRATE_CPU_TARGET_LOW=75             raise when EMA below this
+  MIGRATE_CPU_TARGET_HIGH=85            cut when EMA above this
+  MIGRATE_CPU_PANIC=95                  instant cut on now-CPU (ignore EMA)
+  MIGRATE_CPU_EMA_ALPHA=35              EMA weight for new sample (percent)
+  MIGRATE_CPU_EMA_WARMUP=2              samples before raise/cut (panic still on)
+  MIGRATE_RPS_ADAPTIVE_INTERVAL_SECONDS=25
+  MIGRATE_RPS_ADAPTIVE_START=           if set: wait-task start when RPS off; else store estimate
+  MIGRATE_RPS_MIN=500  MIGRATE_RPS_MAX=8000
+  MIGRATE_RPS_UP_FACTOR=112 DOWN=88 PANIC_FACTOR=80
   DELTA_TARGET_SECONDS=60               catchup took threshold (seconds)
   DELTA_MAX_ROUNDS=10                   catchup max iterations
   DELTA_STOP_CREATED=0                  stop when created <= this
